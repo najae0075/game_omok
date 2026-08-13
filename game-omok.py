@@ -2,6 +2,7 @@ import json
 import random
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 SIZE = 15
@@ -12,9 +13,41 @@ DIRECTIONS = [(1, 0), (0, 1), (1, 1), (1, -1)]
 USER_DB_PATH = Path(__file__).with_name("omok_users.json")
 
 
+def get_default_difficulty_stats():
+    return {
+        "easy": {"wins": 0, "losses": 0, "draws": 0},
+        "normal": {"wins": 0, "losses": 0, "draws": 0},
+        "hard": {"wins": 0, "losses": 0, "draws": 0},
+    }
+
+
+def normalize_user(user):
+    difficulty_stats = user.get("difficulty_stats")
+    if not isinstance(difficulty_stats, dict):
+        difficulty_stats = get_default_difficulty_stats()
+
+    for level in ["easy", "normal", "hard"]:
+        level_stats = difficulty_stats.get(level, {})
+        if not isinstance(level_stats, dict):
+            level_stats = {}
+        difficulty_stats[level] = {
+            "wins": int(level_stats.get("wins", 0) or 0),
+            "losses": int(level_stats.get("losses", 0) or 0),
+            "draws": int(level_stats.get("draws", 0) or 0),
+        }
+
+    return {
+        "name": str(user.get("name", "게스트")).strip(),
+        "wins": int(user.get("wins", 0) or 0),
+        "losses": int(user.get("losses", 0) or 0),
+        "draws": int(user.get("draws", 0) or 0),
+        "difficulty_stats": difficulty_stats,
+    }
+
+
 def load_users():
     if not USER_DB_PATH.exists():
-        default_users = [{"name": "게스트", "wins": 0, "losses": 0, "draws": 0}]
+        default_users = [{"name": "게스트", "wins": 0, "losses": 0, "draws": 0, "difficulty_stats": get_default_difficulty_stats()}]
         USER_DB_PATH.write_text(json.dumps(default_users, ensure_ascii=False, indent=2), encoding="utf-8")
         return default_users
 
@@ -25,17 +58,12 @@ def load_users():
             for user in data:
                 if not isinstance(user, dict):
                     continue
-                normalized.append({
-                    "name": str(user.get("name", "게스트")).strip(),
-                    "wins": int(user.get("wins", 0) or 0),
-                    "losses": int(user.get("losses", 0) or 0),
-                    "draws": int(user.get("draws", 0) or 0),
-                })
+                normalized.append(normalize_user(user))
             return normalized
     except Exception:
         pass
 
-    fallback = [{"name": "게스트", "wins": 0, "losses": 0, "draws": 0}]
+    fallback = [{"name": "게스트", "wins": 0, "losses": 0, "draws": 0, "difficulty_stats": get_default_difficulty_stats()}]
     USER_DB_PATH.write_text(json.dumps(fallback, ensure_ascii=False, indent=2), encoding="utf-8")
     return fallback
 
@@ -49,7 +77,13 @@ def get_user_record(name):
     for user in users:
         if user["name"] == name:
             return user
-    return {"name": name, "wins": 0, "losses": 0, "draws": 0}
+    return {
+        "name": name, 
+        "wins": 0, 
+        "losses": 0, 
+        "draws": 0,
+        "difficulty_stats": get_default_difficulty_stats(),
+    }
 
 
 def ensure_user_exists(name):
@@ -59,13 +93,13 @@ def ensure_user_exists(name):
     for user in st.session_state.users:
         if user["name"] == clean_name:
             return user
-    user = {"name": clean_name, "wins": 0, "losses": 0, "draws": 0}
+    user = {"name": clean_name, "wins": 0, "losses": 0, "draws": 0, "difficulty_stats": get_default_difficulty_stats()}
     st.session_state.users.append(user)
     save_users(st.session_state.users)
     return user
 
 
-def update_user_stats(name, result):
+def update_user_stats(name, result, difficulty="normal"):
     user = ensure_user_exists(name)
     if user is None:
         return
@@ -77,6 +111,19 @@ def update_user_stats(name, result):
     elif result == "draw":
         user["draws"] += 1
 
+    if "difficulty_stats" not in user or not isinstance(user["difficulty_stats"], dict):
+        user["difficulty_stats"] = get_default_difficulty_stats()
+
+    if difficulty not in user["difficulty_stats"]:
+        user["difficulty_stats"][difficulty] = {"wins": 0, "losses": 0, "draws": 0}
+
+    if result == "win":
+        user["difficulty_stats"][difficulty]["wins"] += 1
+    elif result == "loss":
+        user["difficulty_stats"][difficulty]["losses"] += 1
+    elif result == "draw":
+        user["difficulty_stats"][difficulty]["draws"] += 1
+
     save_users(st.session_state.users)
 
 
@@ -85,6 +132,13 @@ def get_user_win_rate(user):
     if total == 0:
         return 0.0
     return (user["wins"] / total) * 100
+
+
+def get_difficulty_win_rate(stats):
+    total = stats["wins"] + stats["losses"] + stats["draws"]
+    if total == 0:
+        return 0.0
+    return (stats["wins"] / total) * 100
 
 
 def record_game_result(winner):
@@ -96,12 +150,14 @@ def record_game_result(winner):
     if current_user is None:
         return
 
+    difficulty = st.session_state.get("difficulty", "normal")
+
     if winner == "사용자":
-        update_user_stats(current_user, "win")
+        update_user_stats(current_user, "win", difficulty)
     elif winner == "컴퓨터":
-        update_user_stats(current_user, "loss")
+        update_user_stats(current_user, "loss", difficulty)
     else:
-        update_user_stats(current_user, "draw")
+        update_user_stats(current_user, "draw", difficulty)
 
 
 def new_board():
@@ -255,6 +311,7 @@ def initialize_game():
     st.session_state.winner = None
     st.session_state.message = "당신의 차례입니다. 돌을 놓아주세요."
     st.session_state.game_result_recorded = False
+    st.session_state.result_notice_shown = False
 
 
 st.set_page_config(page_title="오목 게임", page_icon="⚫", layout="wide")
@@ -343,11 +400,21 @@ if "board" not in st.session_state:
 if "difficulty" not in st.session_state:
     st.session_state.difficulty = "normal"
 
+if "game_mode" not in st.session_state:
+    st.session_state.game_mode = "computer"
+
 st.title("⚫ 오목 게임")
 st.caption("컴퓨터와 대결하는 웹 오목게임")
 
 with st.sidebar:
     st.header("게임 설정")
+
+    st.session_state.game_mode = st.selectbox(
+        "게임 모드",
+        ["computer", "human"],
+        index=0 if st.session_state.game_mode == "computer" else 1,
+        format_func=lambda x: {"computer": "컴퓨터 대전", "human": "사람 대 사람"}[x],
+    )
 
     user_names = [user["name"] for user in st.session_state.users]
     selected_index = user_names.index(st.session_state.selected_user) if st.session_state.selected_user in user_names else 0
@@ -358,7 +425,13 @@ with st.sidebar:
         cleaned = new_name.strip()
         if cleaned:
             if cleaned not in user_names:
-                st.session_state.users.append({"name": cleaned, "wins": 0, "losses": 0, "draws": 0})
+                st.session_state.users.append({
+                    "name": cleaned,
+                    "wins": 0,
+                    "losses": 0,
+                    "draws": 0,
+                    "difficulty_stats": get_default_difficulty_stats(),
+                })
                 save_users(st.session_state.users)
                 st.session_state.selected_user = cleaned
                 st.rerun()
@@ -384,6 +457,27 @@ with st.sidebar:
     st.write(f"승: {current_user['wins']} | 패: {current_user['losses']} | 무: {current_user['draws']}")
     st.write(f"승률: {win_rate:.1f}% ({total_games}게임)")
 
+    difficulty_labels = {"easy": "쉬움", "normal": "보통", "hard": "어려움"}
+    chart_rows = []
+    for level in ["easy", "normal", "hard"]:
+        stats = current_user.get("difficulty_stats", {}).get(level, {"wins": 0, "losses": 0, "draws": 0})
+        chart_rows.append({
+            "난이도": difficulty_labels[level],
+            "승": stats.get("wins", 0),
+            "패": stats.get("losses", 0),
+            "무": stats.get("draws", 0),
+        })
+
+    chart_df = pd.DataFrame(chart_rows)
+    st.subheader("난이도별 통계")
+    st.bar_chart(chart_df.set_index("난이도"), use_container_width=True)
+
+    st.subheader("난이도별 상세")
+    for level in ["easy", "normal", "hard"]:
+        stats = current_user.get("difficulty_stats", {}).get(level, {"wins": 0, "losses": 0, "draws": 0})
+        rate = get_difficulty_win_rate(stats)
+        st.write(f"- {difficulty_labels[level]}: {stats['wins']}승 / {stats['losses']}패 / {stats['draws']}무 / 승률 {rate:.1f}%")
+
     leaderboard = sorted(st.session_state.users, key=lambda u: (get_user_win_rate(u), u["wins"], u["draws"]), reverse=True)
     st.subheader("랭킹")
     for idx, user in enumerate(leaderboard[:5], start=1):
@@ -391,7 +485,7 @@ with st.sidebar:
         st.write(f"{idx}. {user['name']} - {rate:.1f}% ({user['wins']}승)")
 
 
-if not st.session_state.game_over and st.session_state.turn == AI:
+if not st.session_state.game_over and st.session_state.game_mode == "computer" and st.session_state.turn == AI:
     ai_row, ai_col = choose_ai_move(st.session_state.board, st.session_state.difficulty)
     if ai_row is None or ai_col is None:
         st.session_state.game_over = True
@@ -410,8 +504,12 @@ if not st.session_state.game_over and st.session_state.turn == AI:
             st.session_state.message = "당신의 차례입니다. 돌을 놓아주세요."
 
 
-turn_class = "turn-black" if st.session_state.turn == USER else "turn-white"
-turn_label = "흑돌 차례" if st.session_state.turn == USER else "백돌 차례"
+if st.session_state.game_mode == "computer":
+    turn_class = "turn-black" if st.session_state.turn == USER else "turn-white"
+    turn_label = "흑돌 차례" if st.session_state.turn == USER else "백돌 차례"
+else:
+    turn_class = "turn-black" if st.session_state.turn == USER else "turn-white"
+    turn_label = "플레이어 1 차례" if st.session_state.turn == USER else "플레이어 2 차례"
 
 st.markdown(
     f"""
@@ -454,7 +552,12 @@ with board_container:
             if (r, c) in board_points and value == EMPTY:
                 label = "·"
 
-            disabled = st.session_state.game_over or st.session_state.turn != USER or value != EMPTY
+            if st.session_state.game_mode == "computer":
+                clickable = not st.session_state.game_over and st.session_state.turn == USER and value == EMPTY
+            else:
+                clickable = not st.session_state.game_over and value == EMPTY
+
+            disabled = not clickable
 
             if cols[c].button(
                 label,
@@ -463,12 +566,31 @@ with board_container:
                 disabled=disabled,
                 help=f"{r+1},{c+1}",
             ):
-                if not st.session_state.game_over and st.session_state.turn == USER and is_valid_move(st.session_state.board, r, c):
-                    st.session_state.board[r][c] = USER
-                    if check_win(st.session_state.board, r, c, USER):
+                if not st.session_state.game_over and is_valid_move(st.session_state.board, r, c):
+                    current_player = st.session_state.turn
+                    st.session_state.board[r][c] = current_player
+
+                    if check_win(st.session_state.board, r, c, current_player):
                         st.session_state.game_over = True
-                        st.session_state.winner = "사용자"
-                        st.session_state.message = "축하합니다! 당신이 승리했습니다."
-                    record_game_result("사용자")
+                        if st.session_state.game_mode == "computer":
+                            st.session_state.winner = "사용자" if current_player == USER else "컴퓨터"
+                            st.session_state.message = "축하합니다! 당신이 승리했습니다." if current_player == USER else "컴퓨터가 승리했습니다."
+                            record_game_result(st.session_state.winner)
+                        else:
+                            st.session_state.winner = "플레이어 1" if current_player == USER else "플레이어 2"
+                            st.session_state.message = f"{st.session_state.winner}가 승리했습니다!"
+                    else:
+                        if st.session_state.game_mode == "computer":
+                            if current_player == USER:
+                                st.session_state.turn = AI
+                                st.session_state.message = "컴퓨터가 수를 생각하고 있습니다..."
+                            else:
+                                st.session_state.turn = USER
+                                st.session_state.message = "당신의 차례입니다. 돌을 놓아주세요."
+                        else:
+                            st.session_state.turn = AI if current_player == USER else USER
+                            st.session_state.message = "플레이어 1 차례입니다." if st.session_state.turn == USER else "플레이어 2 차례입니다."
+
+                    st.rerun()
 
 st.caption("게임 규칙: 같은 색 돌 5개가 연속으로 이어지면 승리합니다.")
